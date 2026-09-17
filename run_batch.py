@@ -67,11 +67,11 @@ MIN_TAGS = 3
 MAX_TAGS = 8
 
 DEFAULT_PARAMS = {
-    "temperature": 0.0,
+    "temperature": 0.7,
     "top_p": 0.9,
     "max_tokens": 350,
     "top_k": 50,
-    "repetition_penalty": 1.1,
+    "repetition_penalty": 1.2,
 }
 
 SYSTEM_PROMPT = """
@@ -417,6 +417,7 @@ async def request_json(
     temperature=params["temperature"],
     top_p=params["top_p"],
     max_tokens=params["max_tokens"],
+    response_format={"type": "json_object"},
     extra_body=extra_body,
 )
 
@@ -1027,272 +1028,325 @@ async def run_full_benchmark(
 #     )
 
 #     await local_client.close()
-async def run_parameter_grid(
-    products: list[dict],
-):
-    # По заданию grid запускаем на 20 товарах
-    test_products = products[:20]
 
-    experiments = []
 
-    parameter_values = {
-        "temperature": [
-            0.0,
-            0.3,
-            0.7,
-        ],
-        "top_p": [
-            0.9,
-            1.0,
-        ],
-        "top_k": [
-            20,
-            50,
-            None,  # unlimited
-        ],
-        "repetition_penalty": [
-            1.0,
-            1.1,
-            1.2,
-        ],
-        "max_tokens": [
-            250,
-            350,
-            500,
-        ],
-    }
+# async def run_parameter_grid(
+#     products: list[dict],
+# ):
+#     # По заданию grid запускаем на 20 товарах
+#     test_products = products[:20]
 
-    total_experiments = sum(
-        len(values)
-        for values in parameter_values.values()
-    )
+#     experiments = []
 
-    experiment_number = 0
+#     parameter_values = {
+#         "temperature": [
+#             0.0,
+#             0.3,
+#             0.7,
+#         ],
+#         "top_p": [
+#             0.9,
+#             1.0,
+#         ],
+#         "top_k": [
+#             20,
+#             50,
+#             None,  # unlimited
+#         ],
+#         "repetition_penalty": [
+#             1.0,
+#             1.1,
+#             1.2,
+#         ],
+#         "max_tokens": [
+#             250,
+#             350,
+#             500,
+#         ],
+#     }
 
-    for parameter_name, values in parameter_values.items():
+#     total_experiments = sum(
+#         len(values)
+#         for values in parameter_values.values()
+#     )
 
-        for value in values:
+#     experiment_number = 0
 
-            experiment_number += 1
+#     for parameter_name, values in parameter_values.items():
 
-            params = DEFAULT_PARAMS.copy()
-            params[parameter_name] = value
+#         for value in values:
 
-            print()
-            print("=" * 70)
-            print(
-                f"Experiment "
-                f"{experiment_number}/{total_experiments}"
-            )
-            print(
-                f"{parameter_name} = {value}"
-            )
-            print("=" * 70)
+#             experiment_number += 1
 
-            started = time.perf_counter()
+#             params = DEFAULT_PARAMS.copy()
+#             params[parameter_name] = value
 
-            results = await asyncio.gather(
-                *[
-                    generate_one(
-                        product,
-                        params,
-                    )
-                    for product in test_products
-                ]
-            )
+#             print()
+#             print("=" * 70)
+#             print(
+#                 f"Experiment "
+#                 f"{experiment_number}/{total_experiments}"
+#             )
+#             print(
+#                 f"{parameter_name} = {value}"
+#             )
+#             print("=" * 70)
 
-            elapsed = (
-                time.perf_counter()
-                - started
-            )
+#             started = time.perf_counter()
 
-            valid_count = sum(
-                result["valid"]
-                for result in results
-            )
+#             results = await asyncio.gather(
+#                 *[
+#                     generate_one(
+#                         product,
+#                         params,
+#                     )
+#                     for product in test_products
+#                 ]
+#             )
 
-            valid_rate = (
-                valid_count
-                / len(results)
-            )
+#             elapsed = (
+#                 time.perf_counter()
+#                 - started
+#             )
 
-            valid_descriptions = [
-                result["card"]["description"]
-                for result in results
-                if result["valid"]
-            ]
+#             valid_count = sum(
+#                 result["valid"]
+#                 for result in results
+#             )
 
-            avg_description_length = (
-                sum(
-                    len(description)
-                    for description
-                    in valid_descriptions
-                )
-                / len(valid_descriptions)
-                if valid_descriptions
-                else 0
-            )
+#             valid_rate = (
+#                 valid_count
+#                 / len(results)
+#             )
 
-            total_output_tokens = sum(
-                result["output_tokens"]
-                for result in results
-            )
+#             valid_descriptions = [
+#                 result["card"]["description"]
+#                 for result in results
+#                 if result["valid"]
+#             ]
 
-            avg_output_tokens = (
-                total_output_tokens
-                / len(results)
-            )
+#             avg_description_length = (
+#                 sum(
+#                     len(description)
+#                     for description
+#                     in valid_descriptions
+#                 )
+#                 / len(valid_descriptions)
+#                 if valid_descriptions
+#                 else 0
+#             )
 
-            throughput = (
-                len(results)
-                / elapsed
-                if elapsed > 0
-                else 0
-            )
+#             total_output_tokens = sum(
+#                 result["output_tokens"]
+#                 for result in results
+#             )
 
-            row = {
-                "parameter": parameter_name,
-                "value": value,
-                "n": len(results),
-                "elapsed_sec": round(
-                    elapsed,
-                    3,
-                ),
-                "throughput": round(
-                    throughput,
-                    4,
-                ),
-                "valid_count": valid_count,
-                "valid_rate": round(
-                    valid_rate,
-                    4,
-                ),
-                "avg_description_length": round(
-                    avg_description_length,
-                    2,
-                ),
-                "output_tokens": total_output_tokens,
-                "avg_output_tokens": round(
-                    avg_output_tokens,
-                    2,
-                ),
-            }
+#             avg_output_tokens = (
+#                 total_output_tokens
+#                 / len(results)
+#             )
 
-            experiments.append(row)
+#             throughput = (
+#                 len(results)
+#                 / elapsed
+#                 if elapsed > 0
+#                 else 0
+#             )
 
-            print(
-                f"valid: "
-                f"{valid_count}/{len(results)} "
-                f"({valid_rate:.2%})"
-            )
+#             row = {
+#                 "parameter": parameter_name,
+#                 "value": value,
+#                 "n": len(results),
+#                 "elapsed_sec": round(
+#                     elapsed,
+#                     3,
+#                 ),
+#                 "throughput": round(
+#                     throughput,
+#                     4,
+#                 ),
+#                 "valid_count": valid_count,
+#                 "valid_rate": round(
+#                     valid_rate,
+#                     4,
+#                 ),
+#                 "avg_description_length": round(
+#                     avg_description_length,
+#                     2,
+#                 ),
+#                 "output_tokens": total_output_tokens,
+#                 "avg_output_tokens": round(
+#                     avg_output_tokens,
+#                     2,
+#                 ),
+#             }
 
-            print(
-                f"avg description: "
-                f"{avg_description_length:.1f}"
-            )
+#             experiments.append(row)
 
-            print(
-                f"avg output tokens: "
-                f"{avg_output_tokens:.1f}"
-            )
+#             print(
+#                 f"valid: "
+#                 f"{valid_count}/{len(results)} "
+#                 f"({valid_rate:.2%})"
+#             )
 
-            print(
-                f"elapsed: "
-                f"{elapsed:.2f} sec"
-            )
+#             print(
+#                 f"avg description: "
+#                 f"{avg_description_length:.1f}"
+#             )
 
-            print(
-                f"throughput: "
-                f"{throughput:.3f} cards/sec"
-            )
+#             print(
+#                 f"avg output tokens: "
+#                 f"{avg_output_tokens:.1f}"
+#             )
 
-    return experiments
+#             print(
+#                 f"elapsed: "
+#                 f"{elapsed:.2f} sec"
+#             )
+
+#             print(
+#                 f"throughput: "
+#                 f"{throughput:.3f} cards/sec"
+#             )
+
+#     return experiments
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
+# async def main():
+
+#     OUTPUT_DIR.mkdir(
+#         parents=True,
+#         exist_ok=True,
+#     )
+
+#     products = load_jsonl(
+#         DEV_PATH,
+#     )
+
+#     print(
+#         f"Loaded products: {len(products)}"
+#     )
+
+#     if len(products) < 20:
+#         raise RuntimeError(
+#             "Для parameter grid нужно "
+#             "минимум 20 товаров"
+#         )
+
+#     print()
+#     print(
+#         "Running parameter grid "
+#         "on first 20 products..."
+#     )
+
+#     started = time.perf_counter()
+
+#     experiments = await run_parameter_grid(
+#         products,
+#     )
+
+#     total_elapsed = (
+#         time.perf_counter()
+#         - started
+#     )
+
+#     with GRID_PATH.open(
+#         "w",
+#         encoding="utf-8",
+#     ) as file:
+#         json.dump(
+#             experiments,
+#             file,
+#             ensure_ascii=False,
+#             indent=2,
+#         )
+
+#     print()
+#     print("=" * 70)
+#     print("GRID FINISHED")
+#     print("=" * 70)
+
+#     print(
+#         f"Total time: "
+#         f"{total_elapsed:.2f} sec"
+#     )
+
+#     print(
+#         f"Results saved to: "
+#         f"{GRID_PATH}"
+#     )
+
+#     print()
+#     print("Results:")
+
+#     for row in experiments:
+#         print(
+#             f"{row['parameter']:25} "
+#             f"{str(row['value']):10} "
+#             f"valid={row['valid_rate']:.2%} "
+#             f"avg_desc={row['avg_description_length']:.1f} "
+#             f"avg_tokens={row['avg_output_tokens']:.1f}"
+#         )
+
+#     await local_client.close()
+
+
+# if __name__ == "__main__":
+#     asyncio.run(main())
+
+
 async def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    dev_products = load_jsonl(DEV_PATH)
+
+    print(f"dev products: {len(dev_products)}")
+    print("\nRunning generation...")
+
+    concurrency = 4
+
+    async def generate(item):
+        return await generate_one(item, DEFAULT_PARAMS)
+
+    results, elapsed = await run_concurrent(
+        dev_products,
+        concurrency,
+        generate,
     )
 
-    products = load_jsonl(
-        DEV_PATH,
+    predictions = [result["card"] for result in results]
+    save_jsonl(PREDICTIONS_PATH, predictions)
+
+    valid_count = sum(
+        result["valid"]
+        for result in results
     )
 
-    print(
-        f"Loaded products: {len(products)}"
-    )
+    n = len(results)
+    valid_rate = valid_count / n
+    throughput = n / elapsed
 
-    if len(products) < 20:
-        raise RuntimeError(
-            "Для parameter grid нужно "
-            "минимум 20 товаров"
-        )
+    print("\nInvalid results:")
 
-    print()
-    print(
-        "Running parameter grid "
-        "on first 20 products..."
-    )
+    for result in results:
+        if not result["valid"]:
+            print(
+                f"{result['card']['product_id']}: "
+                f"{result.get('error')}"
+            )
 
-    started = time.perf_counter()
-
-    experiments = await run_parameter_grid(
-        products,
-    )
-
-    total_elapsed = (
-        time.perf_counter()
-        - started
-    )
-
-    with GRID_PATH.open(
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            experiments,
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    print()
-    print("=" * 70)
-    print("GRID FINISHED")
-    print("=" * 70)
-
-    print(
-        f"Total time: "
-        f"{total_elapsed:.2f} sec"
-    )
-
-    print(
-        f"Results saved to: "
-        f"{GRID_PATH}"
-    )
-
-    print()
-    print("Results:")
-
-    for row in experiments:
-        print(
-            f"{row['parameter']:25} "
-            f"{str(row['value']):10} "
-            f"valid={row['valid_rate']:.2%} "
-            f"avg_desc={row['avg_description_length']:.1f} "
-            f"avg_tokens={row['avg_output_tokens']:.1f}"
-        )
+    print("\nDone.")
+    print(f"Predictions: {PREDICTIONS_PATH}")
+    print(f"Elapsed: {elapsed:.2f} sec")
+    print(f"Throughput: {throughput:.3f} cards/sec")
+    print(f"Valid rate: {valid_rate:.2%}")
 
     await local_client.close()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
