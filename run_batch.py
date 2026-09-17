@@ -1,11 +1,9 @@
 import asyncio
 import json
-import os
 import re
 import time
-import uuid
 from pathlib import Path
-
+import random
 import httpx
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
@@ -19,7 +17,7 @@ INPUT_TOKEN_BUDGET = 1500
 
 VM_RATE_PER_HOUR = 65.0
 
-MAX_REQUEST_ATTEMPTS = 4
+
 MAX_GENERATION_ATTEMPTS = 3
 
 DEFAULT_PARAMS = {
@@ -194,6 +192,7 @@ def count_sentences(text):
 
 def parse_and_validate(
     content: str,
+    expected_product_id:str,
 ) -> dict:
 
     try:
@@ -228,6 +227,11 @@ def parse_and_validate(
         raise ResponseValidationError(
             "Получены лишние поля: "
             f"{sorted(unexpected_fields)}"
+        )
+
+    if expected_product_id != data["product_id"] :
+        raise ResponseValidationError(
+            f"Неверный product_id. Ожидали {expected_product_id}. Получили {data['product_id']}"
         )
 
     description = data["description"]
@@ -402,12 +406,13 @@ async def generate_one(
     last_error = None
 
     for attempt in range(1, MAX_GENERATION_ATTEMPTS+1):
+        content=None
         try:
             content, usage = await request_json(
                 messages=messages,
                 params=params,
             )
-            card = parse_and_validate(content)
+            card = parse_and_validate(content,expected_product_id=product["product_id"])
 
             elapsed = time.perf_counter() - started
 
@@ -448,7 +453,7 @@ async def generate_one(
                     "role":"user",
                     "content":(
                         "Предыдущий ответ не прошёл проверку. "
-                        f"Причина: {error}. "
+                        f"Причина: {last_error}. "
                         "Исправь ответ и верни только JSON."
                     )
                 })
