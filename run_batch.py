@@ -22,10 +22,7 @@ INPUT_TOKEN_BUDGET = 1500
 
 VM_RATE_PER_HOUR = 65.0
 
-
 MAX_GENERATION_ATTEMPTS = 3
-
-
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEV_PATH = PROJECT_DIR / "dev.jsonl"
@@ -46,7 +43,6 @@ local_client = AsyncOpenAI(
         timeout=600,
     ),
 )
-
 
 EXPECTED_FIELDS = {
     "product_id",
@@ -195,16 +191,13 @@ def save_jsonl(path: Path, items: list[dict]) -> None:
             )
 
 
-
 def render_product(product: dict) -> str:
-
     parts = []
 
     for key, value in product.items():
         parts.append(f"{key}: {value}")
 
     return "\n".join(parts)
-
 
 
 def count_messages_tokens(messages: list[dict]) -> int:
@@ -226,15 +219,13 @@ def count_messages_tokens(messages: list[dict]) -> int:
     return len(token_ids)
 
 
-
 class ResponseValidationError(ValueError):
     """Ошибка парсинга или проверки ответа модели."""
 
 
 def build_messages(product: dict):
-
+    product = copy.deepcopy(product)
     while True:
-        product = copy.deepcopy(product)
         user_content = render_product(product)
 
         messages = [
@@ -256,25 +247,23 @@ def build_messages(product: dict):
         product["reviews"].pop()
 
 
-
 def count_sentences(text):
     return len(
         [
             s
             for s in re.split(
-                r"[.!?]+(?!\d)",
-                text,
-            )
+            r"[.!?]+(?!\d)",
+            text,
+        )
             if s.strip()
         ]
     )
 
 
 def parse_and_validate(
-    content: str,
-    expected_product_id:str,
+        content: str,
+        expected_product_id: str,
 ) -> dict:
-
     try:
         data = json.loads(content)
     except json.JSONDecodeError as error:
@@ -290,11 +279,11 @@ def parse_and_validate(
     received_fields = set(data)
 
     missing_fields = (
-        EXPECTED_FIELDS - received_fields
+            EXPECTED_FIELDS - received_fields
     )
 
     unexpected_fields = (
-        received_fields - EXPECTED_FIELDS
+            received_fields - EXPECTED_FIELDS
     )
 
     if missing_fields:
@@ -309,7 +298,7 @@ def parse_and_validate(
             f"{sorted(unexpected_fields)}"
         )
 
-    if expected_product_id != data["product_id"] :
+    if expected_product_id != data["product_id"]:
         raise ResponseValidationError(
             f"Неверный product_id. Ожидали {expected_product_id}. Получили {data['product_id']}"
         )
@@ -329,9 +318,9 @@ def parse_and_validate(
         )
 
     if not (
-        MIN_DESCRIPTION_LENGTH
-        <= len(description)
-        <= MAX_DESCRIPTION_LENGTH
+            MIN_DESCRIPTION_LENGTH
+            <= len(description)
+            <= MAX_DESCRIPTION_LENGTH
     ):
         raise ResponseValidationError(
             "Поле description должно содержать "
@@ -342,9 +331,9 @@ def parse_and_validate(
     sentence_count = count_sentences(description)
 
     if not (
-        MIN_DESCRIPTION_SENTENCES
-        <= sentence_count
-        <= MAX_DESCRIPTION_SENTENCES
+            MIN_DESCRIPTION_SENTENCES
+            <= sentence_count
+            <= MAX_DESCRIPTION_SENTENCES
     ):
         raise ResponseValidationError(
             "Поле description должно содержать "
@@ -366,8 +355,8 @@ def parse_and_validate(
         )
 
     if not all(
-        isinstance(item, str) and item.strip()
-        for item in pros
+            isinstance(item, str) and item.strip()
+            for item in pros
     ):
         raise ResponseValidationError(
             "Все элементы pros должны быть "
@@ -388,8 +377,8 @@ def parse_and_validate(
         )
 
     if not all(
-        isinstance(item, str) and item.strip()
-        for item in cons
+            isinstance(item, str) and item.strip()
+            for item in cons
     ):
         raise ResponseValidationError(
             "Все элементы cons должны быть "
@@ -410,8 +399,8 @@ def parse_and_validate(
         )
 
     if not all(
-        isinstance(item, str) and item.strip()
-        for item in tags
+            isinstance(item, str) and item.strip()
+            for item in tags
     ):
         raise ResponseValidationError(
             "Все элементы tags должны быть "
@@ -428,9 +417,9 @@ def parse_and_validate(
 
 
 def calculate_retry_delay(
-    attempt: int,
-    base_delay: float = 1.0,
-    max_delay: float = 30.0,
+        attempt: int,
+        base_delay: float = 1.0,
+        max_delay: float = 30.0,
 ) -> float:
     """Рассчитать задержку перед следующей попыткой."""
 
@@ -442,28 +431,28 @@ def calculate_retry_delay(
         max_delay,
     )
 
+
 async def request_json(
-    messages: list[dict],
-    params: dict,
+        messages: list[dict],
+        params: dict,
 ):
     extra_body = {
-    "repetition_penalty": params["repetition_penalty"],
-    "guided_json": SCHEMA,
-    "guided_decoding_backend": "outlines",
+        "repetition_penalty": params["repetition_penalty"],
+        "guided_json": SCHEMA,
+        "guided_decoding_backend": "outlines",
     }
 
-    
     if params["top_k"] is not None:
         extra_body["top_k"] = params["top_k"]
 
     response = await local_client.chat.completions.create(
-    model=MODEL,
-    messages=messages,
-    temperature=params["temperature"],
-    top_p=params["top_p"],
-    max_tokens=params["max_tokens"],
-    extra_body=extra_body,
-)
+        model=MODEL,
+        messages=messages,
+        temperature=params["temperature"],
+        top_p=params["top_p"],
+        max_tokens=params["max_tokens"],
+        extra_body=extra_body,
+    )
 
     content = response.choices[0].message.content
 
@@ -476,10 +465,9 @@ async def request_json(
 
 
 async def generate_one(
-    product: dict,
-    params: dict | None = DEFAULT_PARAMS,
+        product: dict,
+        params: dict | None = DEFAULT_PARAMS,
 ):
-    
     started = time.perf_counter()
 
     messages, input_tokens = build_messages(product)
@@ -584,12 +572,10 @@ async def generate_one(
     }
 
 
-
-
 async def run_concurrent(
-    items,
-    concurrency,
-    generate_one_func,
+        items,
+        concurrency,
+        generate_one_func,
 ):
     sem = asyncio.Semaphore(concurrency)
 
@@ -609,6 +595,7 @@ async def run_concurrent(
     elapsed = time.perf_counter() - started
 
     return results, elapsed
+
 
 # async def run_parameter_grid(
 #     products: list[dict],
@@ -912,10 +899,10 @@ async def main():
 
     print("\nInvalid results:")
     cost_vllm_per_1000 = (
-        elapsed / 3600
-        * 65
-        / n
-        * 1000
+            elapsed / 3600
+            * 65
+            / n
+            * 1000
     )
 
     for result in results:
