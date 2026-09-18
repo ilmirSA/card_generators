@@ -7,7 +7,12 @@ import random
 import httpx
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
-
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -483,6 +488,12 @@ async def generate_one(
     total_output_tokens = 0
     attempts = 0
     last_error = None
+    retryable_errors = (
+        RateLimitError,
+        APITimeoutError,
+        APIConnectionError,
+        InternalServerError,
+    )
 
     for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
         content = None
@@ -521,6 +532,12 @@ async def generate_one(
                 "elapsed_sec": elapsed,
                 "valid": True,
             }
+        except retryable_errors as error:
+            last_error = str(error)
+            if attempt == MAX_GENERATION_ATTEMPTS:
+                break
+            delay = calculate_retry_delay(attempt=attempt)
+            await asyncio.sleep(delay)
 
         except ResponseValidationError as error:
             print(
@@ -530,15 +547,6 @@ async def generate_one(
             print(f"Model response:\n{content}")
 
             last_error = str(error)
-
-            if attempt == MAX_GENERATION_ATTEMPTS:
-                break
-
-            delay = calculate_retry_delay(
-                attempt=attempt,
-            )
-
-            await asyncio.sleep(delay)
 
             if content is not None:
                 messages.append({
