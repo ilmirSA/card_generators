@@ -903,6 +903,12 @@ async def main():
     throughput = n / elapsed
 
     print("\nInvalid results:")
+    cost_vllm_per_1000 = (
+        elapsed / 3600
+        * 65
+        / n
+        * 1000
+    )
 
     for result in results:
         if not result["valid"]:
@@ -916,9 +922,12 @@ async def main():
     print(f"Elapsed: {elapsed:.2f} sec")
     print(f"Throughput: {throughput:.3f} cards/sec")
     print(f"Valid rate: {valid_rate:.2%}")
+    print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
 
     await local_client.close()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
