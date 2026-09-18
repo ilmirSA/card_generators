@@ -1,0 +1,9 @@
+"httpx[socks]"
+vllm==0.6.6
+transformers==4.47.1
+bitsandbytes==0.45.0
+accelerate==1.2.1
+numpy==1.26.4
+jupyter==1.0.0
+ipykernel==6.29.4
+tqdm==4.66.4

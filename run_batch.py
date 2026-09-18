@@ -66,6 +66,43 @@ MAX_CONS = 3
 MIN_TAGS = 3
 MAX_TAGS = 8
 
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "product_id": {
+            "type": "string",
+        },
+        "description": {
+            "type": "string",
+        },
+        "pros": {
+            "type": "array",
+            "items": {
+                "type": "string",
+            },
+        },
+        "cons": {
+            "type": "array",
+            "items": {
+                "type": "string",
+            },
+        },
+        "tags": {
+            "type": "array",
+            "items": {
+                "type": "string",
+            },
+        },
+    },
+    "required": [
+        "product_id",
+        "description",
+        "pros",
+        "cons",
+        "tags",
+    ],
+}
+
 DEFAULT_PARAMS = {
     "temperature": 0.7,
     "top_p": 0.9,
@@ -192,6 +229,7 @@ class ResponseValidationError(ValueError):
 def build_messages(product: dict):
 
     while True:
+        product = copy.deepcopy(product)
         user_content = render_product(product)
 
         messages = [
@@ -405,6 +443,8 @@ async def request_json(
 ):
     extra_body = {
     "repetition_penalty": params["repetition_penalty"],
+    "guided_json": SCHEMA,
+    "guided_decoding_backend": "outlines",
     }
 
     
@@ -417,7 +457,6 @@ async def request_json(
     temperature=params["temperature"],
     top_p=params["top_p"],
     max_tokens=params["max_tokens"],
-    response_format={"type": "json_object"},
     extra_body=extra_body,
 )
 
@@ -433,55 +472,72 @@ async def request_json(
 
 async def generate_one(
     product: dict,
-    params: dict | None = None,
+    params: dict | None = DEFAULT_PARAMS,
 ):
-    params = params or DEFAULT_PARAMS
-
+    
     started = time.perf_counter()
 
     messages, input_tokens = build_messages(product)
 
+    total_input_tokens = 0
+    total_output_tokens = 0
+    attempts = 0
     last_error = None
 
-    for attempt in range(1, MAX_GENERATION_ATTEMPTS+1):
-        content=None
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        content = None
+        attempts += 1
+
         try:
             content, usage = await request_json(
                 messages=messages,
                 params=params,
             )
-            card = parse_and_validate(content,expected_product_id=product["product_id"])
+
+            total_input_tokens += getattr(
+                usage,
+                "prompt_tokens",
+                input_tokens,
+            )
+
+            total_output_tokens += getattr(
+                usage,
+                "completion_tokens",
+                0,
+            )
+
+            card = parse_and_validate(
+                content,
+                expected_product_id=product["product_id"],
+            )
 
             elapsed = time.perf_counter() - started
 
             return {
-                    "card": card,
-                    "input_tokens": getattr(
-                        usage,
-                        "prompt_tokens",
-                        input_tokens,
-                    ),
-                    "output_tokens": getattr(
-                        usage,
-                        "completion_tokens",
-                        0,
-                    ),
-                    "elapsed_sec": elapsed,
-                    "valid": True,
-                }
+                "card": card,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "attempts": attempts,
+                "elapsed_sec": elapsed,
+                "valid": True,
+            }
+
         except ResponseValidationError as error:
-            print(f"\nINVALID product={product['product_id']}")
+            print(
+                f"\nINVALID product={product['product_id']}"
+            )
             print(f"Reason: {error}")
             print(f"Model response:\n{content}")
+
             last_error = str(error)
 
             if attempt == MAX_GENERATION_ATTEMPTS:
                 break
-            
 
             delay = calculate_retry_delay(
-                    attempt=attempt,
-                )
+                attempt=attempt,
+            )
+
             await asyncio.sleep(delay)
 
             if content is not None:
@@ -491,15 +547,14 @@ async def generate_one(
                 })
 
                 messages.append({
-                    "role":"user",
-                    "content":(
+                    "role": "user",
+                    "content": (
                         "Предыдущий ответ не прошёл проверку. "
                         f"Причина: {last_error}. "
                         "Исправь ответ и верни только JSON."
-                    )
+                    ),
                 })
-              
-                    
+
     elapsed = time.perf_counter() - started
 
     fallback_card = {
@@ -512,8 +567,9 @@ async def generate_one(
 
     return {
         "card": fallback_card,
-        "input_tokens": input_tokens,
-        "output_tokens": 0,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "attempts": attempts,
         "elapsed_sec": elapsed,
         "valid": False,
         "error": last_error,
@@ -545,490 +601,6 @@ async def run_concurrent(
     elapsed = time.perf_counter() - started
 
     return results, elapsed
-
-
-
-
-# async def run_concurrency_test(
-#     products: list[dict],
-# ):
-#     """
-#     Замеряем несколько уровней concurrency.
-
-#     Для теста используем первые 64 товара.
-#     """
-
-#     test_products = products[:64]
-
-#     concurrency_levels = [
-#         1,
-#         4,
-#         8,
-#         16,
-#         32,
-#     ]
-
-#     rows = []
-
-#     for concurrency in concurrency_levels:
-
-#         async def generate(item):
-#             return await generate_one(
-#                 item,
-#                 DEFAULT_PARAMS,
-#             )
-
-#         results, elapsed = await run_concurrent(
-#             test_products,
-#             concurrency,
-#             generate,
-#         )
-
-#         valid_count = sum(
-#             result["valid"]
-#             for result in results
-#         )
-
-#         n = len(results)
-
-#         valid_rate = valid_count / n
-#         throughput = n / elapsed
-
-#         rows.append(
-#             {
-#                 "concurrency": concurrency,
-#                 "n": n,
-#                 "elapsed_sec": elapsed,
-#                 "throughput_cards_per_sec": throughput,
-#                 "valid_rate": valid_rate,
-#             }
-#         )
-
-#     return rows
-
-
-
-# async def run_parameter_grid(
-#     products: list[dict],
-# ):
-#     """
-#     Небольшой one-factor-at-a-time эксперимент.
-#     """
-
-#     test_products = products[:20]
-
-#     experiments = []
-
-#     parameter_values = {
-#         "temperature": [
-#             0.0,
-#             0.3,
-#             0.7,
-#         ],
-#         "top_p": [
-#             0.9,
-#             1.0,
-#         ],
-#         "top_k": [
-#             20,
-#             50,
-#         ],
-#         "repetition_penalty": [
-#             1.0,
-#             1.1,
-#             1.2,
-#         ],
-#         "max_tokens": [
-#             250,
-#             350,
-#             500,
-#         ],
-#     }
-
-#     for parameter_name, values in parameter_values.items():
-
-#         for value in values:
-
-#             params = DEFAULT_PARAMS.copy()
-#             params[parameter_name] = value
-
-#             async def generate(item):
-#                 return await generate_one(
-#                     item,
-#                     params,
-#                 )
-
-#             started = time.perf_counter()
-
-#             results = await asyncio.gather(
-#                 *[
-#                     generate(item)
-#                     for item in test_products
-#                 ]
-#             )
-
-#             elapsed = time.perf_counter() - started
-
-#             valid_count = sum(
-#                 result["valid"]
-#                 for result in results
-#             )
-
-#             experiments.append(
-#                 {
-#                     "parameter": parameter_name,
-#                     "value": value,
-#                     "n": len(results),
-#                     "elapsed_sec": elapsed,
-#                     "valid_rate": (
-#                         valid_count / len(results)
-#                     ),
-#                 }
-#             )
-
-#     return experiments
-
-
-
-# async def run_full_benchmark(
-#     products: list[dict],
-#     concurrency: int,
-# ):
-#     async def generate(item):
-#         return await generate_one(
-#             item,
-#             DEFAULT_PARAMS,
-#         )
-
-#     results, elapsed = await run_concurrent(
-#         products,
-#         concurrency,
-#         generate,
-#     )
-
-#     predictions = [
-#         result["card"]
-#         for result in results
-#     ]
-
-#     total_input_tokens = sum(
-#         result["input_tokens"]
-#         for result in results
-#     )
-
-#     total_output_tokens = sum(
-#         result["output_tokens"]
-#         for result in results
-#     )
-
-#     valid_count = sum(
-#         result["valid"]
-#         for result in results
-#     )
-
-#     n = len(results)
-
-#     cost_run = (
-#         elapsed
-#         / 3600
-#         * VM_RATE_PER_HOUR
-#     )
-
-#     cost_per_1000 = (
-#         cost_run
-#         / n
-#         * 1000
-#     )
-
-#     return {
-#         "predictions": predictions,
-#         "run": {
-#             "model": MODEL,
-#             "n": n,
-#             "elapsed_sec": elapsed,
-#             "throughput_cards_per_sec": (
-#                 n / elapsed
-#             ),
-#             "input_tokens": total_input_tokens,
-#             "output_tokens": total_output_tokens,
-#             "valid_rate": valid_count / n,
-#             "vm_rate_per_hour": VM_RATE_PER_HOUR,
-#             "cost_run_rub": cost_run,
-#             "cost_per_1000_cards_rub": cost_per_1000,
-#             "concurrency": concurrency,
-#             "generation_params": DEFAULT_PARAMS,
-#         },
-#     }
-
-
-
-# def save_report(
-#     run_data: dict,
-#     concurrency_table: list[dict],
-#     params_grid: list[dict],
-# ):
-#     OUTPUT_DIR.mkdir(
-#         parents=True,
-#         exist_ok=True,
-#     )
-
-#     report = {
-#         "run": run_data,
-#         "metrics": {},
-#         "api_comparison": {},
-#     }
-
-#     report["run"]["concurrency_table"] = (
-#         concurrency_table
-#     )
-
-#     report["run"]["parameter_grid"] = (
-#         params_grid
-#     )
-
-#     with REPORT_PATH.open(
-#         "w",
-#         encoding="utf-8",
-#     ) as file:
-#         json.dump(
-#             report,
-#             file,
-#             ensure_ascii=False,
-#             indent=2,
-#         )
-
-
-# async def main():
-#     OUTPUT_DIR.mkdir(
-#         parents=True,
-#         exist_ok=True,
-#     )
-
-#     dev_products = load_jsonl(
-#         DEV_PATH
-#     )
-
-#     benchmark_products = load_jsonl(
-#         BENCHMARK_PATH
-#     )
-
-#     print(
-#         f"dev products: {len(dev_products)}"
-#     )
-
-#     print(
-#         f"benchmark products: "
-#         f"{len(benchmark_products)}"
-#     )
-
-
-#     print("Running parameter grid...")
-
-#     params_grid = await run_parameter_grid(
-#         dev_products
-#     )
-
-
-#     print("Running concurrency test...")
-
-#     concurrency_table = await run_concurrency_test(
-#         dev_products
-#     )
-
-#     suitable = [
-#         row
-#         for row in concurrency_table
-#         if row["valid_rate"] >= 0.80
-#     ]
-
-#     if not suitable:
-#         raise RuntimeError(
-#             "Ни один уровень concurrency "
-#             "не достиг valid_rate >= 0.80"
-#         )
-
-#     best = max(
-#         suitable,
-#         key=lambda row: row[
-#             "throughput_cards_per_sec"
-#         ],
-#     )
-
-#     best_concurrency = best["concurrency"]
-
-#     print(
-#         f"Selected concurrency: "
-#         f"{best_concurrency}"
-#     )
-
-
-#     print("Running full benchmark...")
-
-#     benchmark_result = await run_full_benchmark(
-#         benchmark_products,
-#         best_concurrency,
-#     )
-
-#     predictions = benchmark_result[
-#         "predictions"
-#     ]
-
-#     save_jsonl(
-#         PREDICTIONS_PATH,
-#         predictions,
-#     )
-
-
-#     save_report(
-#         run_data=benchmark_result["run"],
-#         concurrency_table=concurrency_table,
-#         params_grid=params_grid,
-#     )
-
-#     print()
-#     print("Done.")
-#     print(
-#         f"Predictions: {PREDICTIONS_PATH}"
-#     )
-#     print(
-#         f"Report: {REPORT_PATH}"
-#     )
-#     print(
-#         f"Elapsed: "
-#         f"{benchmark_result['run']['elapsed_sec']:.2f} sec"
-#     )
-#     print(
-#         f"Throughput: "
-#         f"{benchmark_result['run']['throughput_cards_per_sec']:.3f} cards/sec"
-#     )
-#     print(
-#         f"Valid rate: "
-#         f"{benchmark_result['run']['valid_rate']:.2%}"
-#     )
-#     print(
-#         f"Cost / 1000: "
-#         f"{benchmark_result['run']['cost_per_1000_cards_rub']:.2f} ₽"
-#     )
-
-#     await local_client.close()
-async def run_full_benchmark(
-    products: list[dict],
-    concurrency: int,
-):
-    async def generate(item):
-        return await generate_one(
-            item,
-            DEFAULT_PARAMS,
-        )
-
-    results, elapsed = await run_concurrent(
-        products,
-        concurrency,
-        generate,
-    )
-
-    predictions = [
-        result["card"]
-        for result in results
-    ]
-
-    valid_count = sum(
-        result["valid"]
-        for result in results
-    )
-
-    n = len(results)
-
-    return {
-        "predictions": predictions,
-        "elapsed_sec": elapsed,
-        "valid_rate": valid_count / n,
-        "throughput": n / elapsed,
-    }
-
-# async def main():
-#     OUTPUT_DIR.mkdir(
-#         parents=True,
-#         exist_ok=True,
-#     )
-
-#     dev_products = load_jsonl(
-#         DEV_PATH
-#     )
-
-#     print(
-#         f"dev products: {len(dev_products)}"
-#     )
-
-#     print("\nRunning generation...")
-
-#     # Просто генерируем карточки для dev.jsonl
-#     concurrency = 4
-
-#     async def generate(item):
-#         return await generate_one(
-#             item,
-#             DEFAULT_PARAMS,
-#         )
-
-#     results, elapsed = await run_concurrent(
-#         dev_products,
-#         concurrency,
-#         generate,
-#     )
-
-#     # ---------------------------------
-#     # Сохраняем карточки
-#     # ---------------------------------
-
-#     predictions = [
-#         result["card"]
-#         for result in results
-#     ]
-
-#     save_jsonl(
-#         PREDICTIONS_PATH,
-#         predictions,
-#     )
-
-#     # ---------------------------------
-#     # Статистика
-#     # ---------------------------------
-
-#     valid_count = sum(
-#         result["valid"]
-#         for result in results
-#     )
-
-#     n = len(results)
-
-#     valid_rate = valid_count / n
-#     throughput = n / elapsed
-
-#     print("\nDone.")
-
-#     print(
-#         f"Predictions: "
-#         f"{PREDICTIONS_PATH}"
-#     )
-
-#     print(
-#         f"Elapsed: "
-#         f"{elapsed:.2f} sec"
-#     )
-
-#     print(
-#         f"Throughput: "
-#         f"{throughput:.3f} cards/sec"
-#     )
-
-#     print(
-#         f"Valid rate: "
-#         f"{valid_rate:.2%}"
-#     )
-
-#     await local_client.close()
-
 
 # async def run_parameter_grid(
 #     products: list[dict],
