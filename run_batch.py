@@ -244,6 +244,10 @@ def count_messages_tokens(messages: list[dict]) -> int:
 class ResponseValidationError(ValueError):
     """Ошибка парсинга или проверки ответа модели."""
 
+    def __init__(self, message: str, reason: str = "прочее"):
+        super().__init__(message)
+        self.reason = reason
+
 
 def build_messages(product: dict):
     product = copy.deepcopy(product)
@@ -290,12 +294,14 @@ def parse_and_validate(
         data = json.loads(content)
     except json.JSONDecodeError as error:
         raise ResponseValidationError(
-            f"Ответ не является корректным JSON: {error.msg}"
+            f"Ответ не является корректным JSON: {error.msg}",
+            reason="json"
         ) from error
 
     if not isinstance(data, dict):
         raise ResponseValidationError(
-            "На верхнем уровне должен находиться JSON-объект"
+            "На верхнем уровне должен находиться JSON-объект",
+        reason = "структура"
         )
 
     received_fields = set(data)
@@ -311,32 +317,36 @@ def parse_and_validate(
     if missing_fields:
         raise ResponseValidationError(
             "Отсутствуют обязательные поля: "
-            f"{sorted(missing_fields)}"
+            f"{sorted(missing_fields)}",reason="структура",
         )
 
     if unexpected_fields:
         raise ResponseValidationError(
             "Получены лишние поля: "
-            f"{sorted(unexpected_fields)}"
+            f"{sorted(unexpected_fields)}",
+            reason="структура",
         )
 
     if expected_product_id != data["product_id"]:
         raise ResponseValidationError(
-            f"Неверный product_id. Ожидали {expected_product_id}. Получили {data['product_id']}"
+            f"Неверный product_id. Ожидали {expected_product_id}. Получили {data['product_id']}",
+        reason = "product_id",
         )
 
     description = data["description"]
 
     if not isinstance(description, str):
         raise ResponseValidationError(
-            "Поле description должно быть строкой"
+            "Поле description должно быть строкой",
+        reason = "тип description",
         )
 
     description = description.strip()
 
     if not description:
         raise ResponseValidationError(
-            "Поле description не должно быть пустым"
+            "Поле description не должно быть пустым",
+            reason="пустой description",
         )
 
     if not (
@@ -347,7 +357,8 @@ def parse_and_validate(
         raise ResponseValidationError(
             "Поле description должно содержать "
             f"от {MIN_DESCRIPTION_LENGTH} до "
-            f"{MAX_DESCRIPTION_LENGTH} символов"
+            f"{MAX_DESCRIPTION_LENGTH} символов",
+            reason="длина description",
         )
 
     sentence_count = count_sentences(description)
@@ -360,20 +371,23 @@ def parse_and_validate(
         raise ResponseValidationError(
             "Поле description должно содержать "
             f"от {MIN_DESCRIPTION_SENTENCES} до "
-            f"{MAX_DESCRIPTION_SENTENCES} предложений"
+            f"{MAX_DESCRIPTION_SENTENCES} предложений",
+            reason="предложений",
         )
 
     pros = data["pros"]
 
     if not isinstance(pros, list):
         raise ResponseValidationError(
-            "Поле pros должно быть списком"
+            "Поле pros должно быть списком",
+            reason="тип pros",
         )
 
     if not MIN_PROS <= len(pros) <= MAX_PROS:
         raise ResponseValidationError(
             "Поле pros должно содержать "
-            f"от {MIN_PROS} до {MAX_PROS} элементов"
+            f"от {MIN_PROS} до {MAX_PROS} элементов",
+            reason="кол-во pros",
         )
 
     if not all(
@@ -382,20 +396,23 @@ def parse_and_validate(
     ):
         raise ResponseValidationError(
             "Все элементы pros должны быть "
-            "непустыми строками"
+            "непустыми строками",
+            reason="пустые pros",
         )
 
     cons = data["cons"]
 
     if not isinstance(cons, list):
         raise ResponseValidationError(
-            "Поле cons должно быть списком"
+            "Поле cons должно быть списком",
+            reason="тип cons",
         )
 
     if not MIN_CONS <= len(cons) <= MAX_CONS:
         raise ResponseValidationError(
             "Поле cons должно содержать "
-            f"от {MIN_CONS} до {MAX_CONS} элементов"
+            f"от {MIN_CONS} до {MAX_CONS} элементов",
+            reason="кол-во cons",
         )
 
     if not all(
@@ -404,20 +421,21 @@ def parse_and_validate(
     ):
         raise ResponseValidationError(
             "Все элементы cons должны быть "
-            "непустыми строками"
+            "непустыми строками",reason="пустые cons"
         )
 
     tags = data["tags"]
 
     if not isinstance(tags, list):
         raise ResponseValidationError(
-            "Поле tags должно быть списком"
+            "Поле tags должно быть списком",reason="тип tags",
         )
 
     if not MIN_TAGS <= len(tags) <= MAX_TAGS:
         raise ResponseValidationError(
             "Поле tags должно содержать "
-            f"от {MIN_TAGS} до {MAX_TAGS} элементов"
+            f"от {MIN_TAGS} до {MAX_TAGS} элементов",
+            reason="кол-во tags",
         )
 
     if not all(
@@ -426,7 +444,8 @@ def parse_and_validate(
     ):
         raise ResponseValidationError(
             "Все элементы tags должны быть "
-            "непустыми строками"
+            "непустыми строками",
+            reason="пустые tags",
         )
 
     return {
@@ -488,7 +507,7 @@ async def request_json(
 
 async def generate_one(
         product: dict,
-        params: dict | None = DEFAULT_PARAMS,
+        params: dict | None = None,
 ):
     started = time.perf_counter()
 
@@ -498,6 +517,7 @@ async def generate_one(
     total_output_tokens = 0
     attempts = 0
     last_error = None
+    last_reason = None
     retryable_errors = (
         RateLimitError,
         APITimeoutError,
@@ -541,6 +561,7 @@ async def generate_one(
                 "attempts": attempts,
                 "elapsed_sec": elapsed,
                 "valid": True,
+                "error_reason": None,
             }
         except retryable_errors as error:
             last_error = str(error)
@@ -551,12 +572,11 @@ async def generate_one(
 
         except ResponseValidationError as error:
             print(
-                f"\nINVALID product={product['product_id']}"
+                f"\nINVALID product={product['product_id']} "
+                f"[{error.reason}]: {error}"
             )
-            print(f"Reason: {error}")
-            print(f"Model response:\n{content}")
+            last_error = f"{error.reason}: {error}"
 
-            last_error = str(error)
 
             if content is not None:
                 messages.append({
@@ -591,6 +611,7 @@ async def generate_one(
         "elapsed_sec": elapsed,
         "valid": False,
         "error": last_error,
+        "error_reason": last_reason
     }
 
 
@@ -618,7 +639,141 @@ async def run_concurrent(
 
     return results, elapsed
 
+def build_report(
+    *,
+    results: list[dict],
+    elapsed: float,
+    concurrency: int,
+    params: dict,
+    api_comparison: dict | None = None,
+) -> dict:
+    from collections import Counter
 
+    n = len(results)
+
+    valid_results = [r for r in results if r["valid"]]
+    valid_count = len(valid_results)
+    valid_rate = valid_count / n if n else 0.0
+    throughput = n / elapsed if elapsed > 0 else 0.0
+
+    total_input_tokens = sum(r["input_tokens"] for r in results)
+    total_output_tokens = sum(r["output_tokens"] for r in results)
+
+    avg_latency = (
+        sum(r["elapsed_sec"] for r in results) / n if n else 0.0
+    )
+    avg_attempts = (
+        sum(r["attempts"] for r in results) / n if n else 0.0
+    )
+
+    # Время, за которое сгенерировали бы 300 карточек при той же скорости
+    time_for_300_sec = (elapsed / n * 300) if n else 0.0
+
+    # Стоимость 1000 карточек на этой VM
+    cost_vllm_per_1000 = (
+        elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000 if n else 0.0
+    )
+
+    # Категории ошибок
+    errors_by_reason = dict(
+        Counter(
+            r["error_reason"]
+            for r in results
+            if not r["valid"] and r.get("error_reason")
+        )
+    )
+
+    if api_comparison is None:
+        api_comparison = {
+            "model": None,
+            "n": 0,
+            "valid_rate": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "elapsed_sec": 0.0,
+            "cost_per_1000": 0.0,
+        }
+
+    return {
+        "run": {
+            "model": MODEL,
+            "concurrency": concurrency,
+            "params": {
+                "temperature": params["temperature"],
+                "top_p": params["top_p"],
+                "top_k": params["top_k"],
+                "repetition_penalty": params["repetition_penalty"],
+                "max_tokens": params["max_tokens"],
+            },
+            "elapsed_sec": round(elapsed, 3),
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "n": n,
+            "avg_latency": round(avg_latency, 3),
+            "avg_attempts": round(avg_attempts, 3),
+        },
+        "metrics": {
+            "valid": valid_count,
+            "valid_rate": round(valid_rate, 4),
+            "throughput": round(throughput, 4),
+            "time_for_300_sec": round(time_for_300_sec, 3),
+            "cost_vllm_per_1000": round(cost_vllm_per_1000, 4),
+            "errors_by_reason": errors_by_reason,
+        },
+        "api_comparison": api_comparison,
+    }
+
+async def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        dev_products = load_jsonl(DEV_PATH)
+        print(f"dev products: {len(dev_products)}")
+        print("\nRunning generation...")
+
+        concurrency = 16  # было 4, но в примере отчёта 16
+
+        async def generate(item):
+            return await generate_one(item, DEFAULT_PARAMS)
+
+        results, elapsed = await run_concurrent(
+            dev_products,
+            concurrency,
+            generate,
+        )
+
+        predictions = [r["card"] for r in results if r["valid"]]
+        save_jsonl(PREDICTIONS_PATH, predictions)
+
+        report = build_report(
+            results=results,
+            elapsed=elapsed,
+            concurrency=concurrency,
+            params=DEFAULT_PARAMS,
+            api_comparison=None,   # заполнишь, когда прогонишь бесплатную модель
+        )
+
+        with REPORT_PATH.open("w", encoding="utf-8") as file:
+            json.dump(
+                report,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print("\nDone.")
+        print(f"Report: {REPORT_PATH}")
+        print(f"Valid rate: {report['metrics']['valid_rate']:.2%}")
+        print(
+            f"Cost per 1000: "
+            f"{report['metrics']['cost_vllm_per_1000']}"
+        )
+        print(
+            f"Errors: "
+            f"{report['metrics']['errors_by_reason']}"
+        )
+    finally:
+        await local_client.close()
 # async def run_parameter_grid(
 #     products: list[dict],
 # ):
@@ -920,12 +1075,7 @@ async def main():
     throughput = n / elapsed
 
     print("\nInvalid results:")
-    cost_vllm_per_1000 = (
-            elapsed / 3600
-            * 65
-            / n
-            * 1000
-    )
+    cost_vllm_per_1000 = elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000
 
     for result in results:
         if not result["valid"]:
