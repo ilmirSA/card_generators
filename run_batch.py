@@ -4,6 +4,7 @@ import re
 import time
 from pathlib import Path
 import random
+import copy
 import httpx
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
@@ -13,6 +14,7 @@ from openai import (
     InternalServerError,
     RateLimitError,
 )
+from collections import Counter
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -72,50 +74,64 @@ SCHEMA = {
     "properties": {
         "product_id": {
             "type": "string",
+            "minLength": 1
         },
         "description": {
             "type": "string",
+            "minLength": 120,
+            "maxLength": 700
         },
         "pros": {
             "type": "array",
+            "minItems": 2,
+            "maxItems": 5,
             "items": {
                 "type": "string",
-            },
+                "minLength": 1
+            }
         },
         "cons": {
             "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
             "items": {
                 "type": "string",
-            },
+                "minLength": 1
+            }
         },
         "tags": {
             "type": "array",
+            "minItems": 3,
+            "maxItems": 8,
             "items": {
                 "type": "string",
-            },
-        },
+                "minLength": 1
+            }
+        }
     },
     "required": [
         "product_id",
         "description",
         "pros",
         "cons",
-        "tags",
+        "tags"
     ],
+    "additionalProperties": False
 }
 
 DEFAULT_PARAMS = {
-    "temperature": 0.7,
+    "temperature": 0.3,
     "top_p": 0.9,
     "max_tokens": 350,
-    "top_k": 50,
-    "repetition_penalty": 1.2,
+    "top_k": 20,
+    "repetition_penalty": 1.1,
 }
 
 SYSTEM_PROMPT = """
 Ты создаёшь карточку товара для маркетплейса.
 
 Верни только JSON-объект.
+Отвечай на русском языке.
 Никакого markdown.
 Не используй ```json.
 Не добавляй текст до или после JSON.
@@ -133,40 +149,46 @@ SYSTEM_PROMPT = """
 СТРОГИЕ ОГРАНИЧЕНИЯ:
 
 1. product_id:
-- должен точно совпадать с product_id входного товара.
+- строка;
+- должна точно совпадать с product_id входного товара.
 
 2. description:
-- от 120 до 700 символов;
-- ровно от 2 до 5 предложений;
+Это описание товара.
+- строка длиной от 120 до 700 символов;
+- от 2 до 5 предложений;
 - обычный связный текст;
 - без списков;
 - без markdown.
 
 3. pros:
-- ровно 3 элемента;
-- каждый элемент — непустая строка.
+Это положительные качества товара.
+- массив из 2 до 5 элементов;
+- каждый элемент — непустая строка;
+- опирайся только на реальные плюсы товара и отзывы.
 
 4. cons:
-- ровно 2 элемента;
+Это отрицательные качества товара.
+- массив из 1 до 3 элементов;
 - каждый элемент — непустая строка;
-- используй только реальные недостатки из товара и отзывов.
+- используй только реальные недостатки из товара и отзывов;
+- если недостатков мало, укажи хотя бы один.
 
 5. tags:
-- РОВНО 5 элементов;
+Это короткие ключевые слова товара.
+- массив из 3 до 8 элементов;
 - каждый элемент — короткая непустая строка;
 - не повторяй теги;
 - не создавай длинные фразы;
-- не создавай новые теги после пятого;
-- после 5 тегов массив tags ОБЯЗАТЕЛЬНО заканчивается.
+- после последнего тега массив tags ОБЯЗАТЕЛЬНО заканчивается.
 
 ВАЖНО:
 Сначала сформируй все поля.
 Затем проверь:
-- description: 120-700 символов;
-- description: 2-5 предложений;
-- pros: ровно 3;
-- cons: ровно 2;
-- tags: ровно 5.
+- description: 120–700 символов;
+- description: 2–5 предложений;
+- pros: от 2 до 5 элементов;
+- cons: от 1 до 3 элементов;
+- tags: от 3 до 8 элементов.
 
 После проверки верни только полностью закрытый JSON.
 """
@@ -439,7 +461,7 @@ async def request_json(
     extra_body = {
         "repetition_penalty": params["repetition_penalty"],
         "guided_json": SCHEMA,
-        "guided_decoding_backend": "outlines",
+        "guided_decoding_backend": "xgrammar",
     }
 
     if params["top_k"] is not None:
@@ -779,9 +801,9 @@ async def run_concurrent(
 #     return experiments
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# # ============================================================
+# # MAIN
+# # ============================================================
 
 # async def main():
 
@@ -911,6 +933,9 @@ async def main():
                 f"{result['card']['product_id']}: "
                 f"{result.get('error')}"
             )
+    
+    errors = [item["error"] for item in results if item.get('error')]
+    counts_errors = Counter(errors)
 
     print("\nDone.")
     print(f"Predictions: {PREDICTIONS_PATH}")
@@ -918,6 +943,7 @@ async def main():
     print(f"Throughput: {throughput:.3f} cards/sec")
     print(f"Valid rate: {valid_rate:.2%}")
     print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
+    print(f"ошибки {counts_errors}" )
 
     await local_client.close()
 
