@@ -14,7 +14,7 @@ from openai import (
     APITimeoutError,
     InternalServerError,
     RateLimitError,
-BadRequestError
+    BadRequestError
 )
 from collections import Counter
 
@@ -258,7 +258,7 @@ def parse_and_validate(
     if not isinstance(data, dict):
         raise ResponseValidationError(
             "На верхнем уровне должен находиться JSON-объект",
-        reason = "структура"
+            reason="структура"
         )
 
     received_fields = set(data)
@@ -274,7 +274,7 @@ def parse_and_validate(
     if missing_fields:
         raise ResponseValidationError(
             "Отсутствуют обязательные поля: "
-            f"{sorted(missing_fields)}",reason="структура",
+            f"{sorted(missing_fields)}", reason="структура",
         )
 
     if unexpected_fields:
@@ -287,7 +287,7 @@ def parse_and_validate(
     if expected_product_id != data["product_id"]:
         raise ResponseValidationError(
             f"Неверный product_id. Ожидали {expected_product_id}. Получили {data['product_id']}",
-        reason = "product_id",
+            reason="product_id",
         )
 
     description = data["description"]
@@ -295,7 +295,7 @@ def parse_and_validate(
     if not isinstance(description, str):
         raise ResponseValidationError(
             "Поле description должно быть строкой",
-        reason = "тип description",
+            reason="тип description",
         )
 
     description = description.strip()
@@ -378,14 +378,14 @@ def parse_and_validate(
     ):
         raise ResponseValidationError(
             "Все элементы cons должны быть "
-            "непустыми строками",reason="пустые cons"
+            "непустыми строками", reason="пустые cons"
         )
 
     tags = data["tags"]
 
     if not isinstance(tags, list):
         raise ResponseValidationError(
-            "Поле tags должно быть списком",reason="тип tags",
+            "Поле tags должно быть списком", reason="тип tags",
         )
 
     if not MIN_TAGS <= len(tags) <= MAX_TAGS:
@@ -519,12 +519,14 @@ async def generate_one(
                 "attempts": attempts,
                 "elapsed_sec": elapsed,
                 "valid": True,
+                "errors": errors,
                 "error_reason": None,
             }
         except retryable_errors as error:
             errors.append({
                 "attempt": attempt,
                 "kind": "retryable",
+                "reason": error.reason,
                 "type": type(error).__name__,
                 "message": str(error),
             })
@@ -538,6 +540,7 @@ async def generate_one(
             errors.append({
                 "attempt": attempt,
                 "kind": "validation",
+                "reason": error.reason,
                 "type": type(error).__name__,
                 "message": str(error),
             })
@@ -547,7 +550,6 @@ async def generate_one(
             )
             last_error = f"{error.reason}: {error}"
             last_reason = error.reason
-
 
             if content is not None:
                 messages.append({
@@ -582,7 +584,7 @@ async def generate_one(
         "elapsed_sec": elapsed,
         "valid": False,
         "errors": errors,
-        "error": last_error,
+        "last_error": last_error,
         "error_reason": last_reason
     }
 
@@ -591,13 +593,14 @@ async def run_concurrent(
         items,
         concurrency,
         generate_one_func,
+        params,
 
 ):
     sem = asyncio.Semaphore(concurrency)
 
     async def wrapped(item):
         async with sem:
-            return await generate_one_func(item)
+            return await generate_one_func(item, params)
 
     started = time.perf_counter()
 
@@ -612,83 +615,7 @@ async def run_concurrent(
 
     return results, elapsed
 
-def summarize_run(
-    results: list[dict],
-    wall: float,
-    concurrency: int,
-) -> dict:
-    latencies = [r["elapsed_sec"] for r in results]
-    total_out = sum(r["output_tokens"] for r in results)
-    total_in = sum(r["input_tokens"] for r in results)
-    valid = sum(1 for r in results if r["valid"])
-    retried = sum(1 for r in results if r.get("errors"))
 
-    return {
-        "concurrency": concurrency,
-        "n": len(results),
-        "wall_sec": round(wall, 2),
-        "throughput_rps": round(len(results) / wall, 2),
-        "throughput_tps": round(total_out / wall, 1),
-        "input_tokens_total": total_in,
-        "output_tokens_total": total_out,
-        "latency_mean": round(statistics.mean(latencies), 3),
-        "latency_p50": round(percentile(latencies, 0.50), 3),
-        "latency_p95": round(percentile(latencies, 0.95), 3),
-        "latency_p99": round(percentile(latencies, 0.99), 3),
-        "valid_rate": round(valid / len(results), 3),
-        "retry_rate": round(retried / len(results), 3),
-        "attempts_mean": round(
-            statistics.mean(r["attempts"] for r in results), 2
-        ),
-    }
-
-def percentile(values, q):
-    if not values:
-        return 0.0
-    s = sorted(values)
-    idx = min(int(q * len(s)), len(s) - 1)
-    return s[idx]
-
-async def main():
-    products = load_jsonl(BENCHMARK_PATH)
-
-    
-    await run_concurrent(products[:8], 8, generate_one, DEFAULT_PARAMS)
-
-    rows = []
-    for conc in (1, 2, 4, 8, 16, 32):
-        results, wall = await run_concurrent(
-            products, conc, generate_one, DEFAULT_PARAMS,
-        )
-        rows.append(summarize_run(results, wall, conc))
-
-
-    base = rows[0]["valid_rate"]
-    ok = [r for r in rows if r["valid_rate"] >= 0.98 * base]
-    best = max(ok, key=lambda r: r["throughput_rps"])
-    print("Рабочая точка:", best)
-
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    with BENCHMARK_RESULTS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "rows": rows,
-                "working_point": best,
-                "baseline_valid_rate": base,
-                "valid_rate_floor": 0.98,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    print(f"\nСохранено: {BENCHMARK_RESULTS_PATH}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 #
 # def build_report(
@@ -1096,62 +1023,62 @@ if __name__ == "__main__":
 #     asyncio.run(main())
 
 
-# async def main():
-#     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-#
-#     dev_products = load_jsonl(DEV_PATH)
-#
-#     print(f"dev products: {len(dev_products)}")
-#     print("\nRunning generation...")
-#
-#     concurrency = 4
-#
-#     async def generate(item):
-#         return await generate_one(item, DEFAULT_PARAMS)
-#
-#     results, elapsed = await run_concurrent(
-#         dev_products,
-#         concurrency,
-#         generate,
-#     )
-#
-#     predictions = [result["card"] for result in results]
-#     save_jsonl(PREDICTIONS_PATH, predictions)
-#
-#     valid_count = sum(
-#         result["valid"]
-#         for result in results
-#     )
-#
-#     n = len(results)
-#     valid_rate = valid_count / n
-#     throughput = n / elapsed
-#
-#     print("\nInvalid results:")
-#     cost_vllm_per_1000 = elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000
-#
-#     for result in results:
-#         if not result["valid"]:
-#             print(
-#                 f"{result['card']['product_id']}: "
-#                 f"{result.get('error')}"
-#             )
-#
-#     errors = [item["error"] for item in results if item.get('error')]
-#     counts_errors = Counter(errors)
-#
-#     print("\nDone.")
-#     print(f"Predictions: {PREDICTIONS_PATH}")
-#     print(f"Elapsed: {elapsed:.2f} sec")
-#     print(f"Throughput: {throughput:.3f} cards/sec")
-#     print(f"Valid rate: {valid_rate:.2%}")
-#     print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
-#     print(f"ошибки {counts_errors}" )
-#
-#     await local_client.close()
-#
-#
-# if __name__ == "__main__":
-#     asyncio.run(main())
-#
+async def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    dev_products = load_jsonl(DEV_PATH)
+
+    print(f"dev products: {len(dev_products)}")
+    print("\nRunning generation...")
+
+    concurrency = 4
+
+    async def generate(item):
+        return await generate_one(item, DEFAULT_PARAMS)
+
+    results, elapsed = await run_concurrent(
+        dev_products,
+        concurrency,
+        generate,
+    )
+
+    predictions = [result["card"] for result in results]
+    save_jsonl(PREDICTIONS_PATH, predictions)
+
+    valid_count = sum(
+        result["valid"]
+        for result in results
+    )
+
+    n = len(results)
+    valid_rate = valid_count / n
+    throughput = n / elapsed
+
+    print("\nInvalid results:")
+    cost_vllm_per_1000 = elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000
+
+    for result in results:
+        if not result["valid"]:
+            print(
+                f"{result['card']['product_id']}: "
+                f"{result.get('error')}"
+            )
+
+    errors = [item["error"] for item in results if item.get('error')]
+    counts_errors = Counter(errors)
+
+    print("\nDone.")
+    print(f"Predictions: {PREDICTIONS_PATH}")
+    print(f"Elapsed: {elapsed:.2f} sec")
+    print(f"Throughput: {throughput:.3f} cards/sec")
+    print(f"Valid rate: {valid_rate:.2%}")
+    print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
+    print(f"ошибки {counts_errors}" )
+
+    await local_client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
 
