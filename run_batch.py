@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 import random
 import copy
+import statistics
 import httpx
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
@@ -13,6 +14,7 @@ from openai import (
     APITimeoutError,
     InternalServerError,
     RateLimitError,
+BadRequestError
 )
 from collections import Counter
 
@@ -30,7 +32,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DEV_PATH = PROJECT_DIR / "dev.jsonl"
 BENCHMARK_PATH = PROJECT_DIR / "benchmark.jsonl"
 OUTPUT_DIR = PROJECT_DIR / "outputs"
-
+BENCHMARK_RESULTS_PATH = OUTPUT_DIR / "benchmark_results.json"
 PREDICTIONS_PATH = OUTPUT_DIR / "predictions.jsonl"
 REPORT_PATH = OUTPUT_DIR / "report.json"
 GRID_PATH = OUTPUT_DIR / "parameter_grid.json"
@@ -124,73 +126,28 @@ DEFAULT_PARAMS = {
     "top_p": 0.9,
     "max_tokens": 350,
     "top_k": 20,
-    "repetition_penalty": 1.1,
+    "repetition_penalty": 1.2,
 }
 
 SYSTEM_PROMPT = """
-Ты создаёшь карточку товара для маркетплейса.
+Ты создаёшь карточку товара для маркетплейса. Отвечай на русском языке.
 
-Верни только JSON-объект.
-Отвечай на русском языке.
-Никакого markdown.
-Не используй ```json.
-Не добавляй текст до или после JSON.
+Правила по смыслу:
 
-Формат:
+- description — связное описание товара обычным текстом, 2–5 предложений.
+  Без списков. Пиши по делу, без воды и рекламных штампов.
 
-{
-  "product_id": "string",
-  "description": "string",
-  "pros": ["string"],
-  "cons": ["string"],
-  "tags": ["string"]
-}
+- pros — реальные плюсы товара.
+  Бери только то, что есть в данных товара и отзывах. Не выдумывай.
 
-СТРОГИЕ ОГРАНИЧЕНИЯ:
+- cons — реальные минусы товара.
+  Бери только то, что есть в данных товара и отзывах. Не выдумывай.
+  Если минусов мало — укажи самый заметный.
 
-1. product_id:
-- строка;
-- должна точно совпадать с product_id входного товара.
+- tags — короткие ключевые слова товара.
+  Одно-два слова на тег. Без повторов. Без общих слов вроде «товар», «качество».
 
-2. description:
-Это описание товара.
-- строка длиной от 120 до 700 символов;
-- от 2 до 5 предложений;
-- обычный связный текст;
-- без списков;
-- без markdown.
-
-3. pros:
-Это положительные качества товара.
-- массив из 2 до 5 элементов;
-- каждый элемент — непустая строка;
-- опирайся только на реальные плюсы товара и отзывы.
-
-4. cons:
-Это отрицательные качества товара.
-- массив из 1 до 3 элементов;
-- каждый элемент — непустая строка;
-- используй только реальные недостатки из товара и отзывов;
-- если недостатков мало, укажи хотя бы один.
-
-5. tags:
-Это короткие ключевые слова товара.
-- массив из 3 до 8 элементов;
-- каждый элемент — короткая непустая строка;
-- не повторяй теги;
-- не создавай длинные фразы;
-- после последнего тега массив tags ОБЯЗАТЕЛЬНО заканчивается.
-
-ВАЖНО:
-Сначала сформируй все поля.
-Затем проверь:
-- description: 120–700 символов;
-- description: 2–5 предложений;
-- pros: от 2 до 5 элементов;
-- cons: от 1 до 3 элементов;
-- tags: от 3 до 8 элементов.
-
-После проверки верни только полностью закрытый JSON.
+- product_id — точно скопируй из входного товара.
 """
 
 
@@ -518,6 +475,7 @@ async def generate_one(
     attempts = 0
     last_error = None
     last_reason = None
+    errors: list[dict] = []
     retryable_errors = (
         RateLimitError,
         APITimeoutError,
@@ -564,6 +522,12 @@ async def generate_one(
                 "error_reason": None,
             }
         except retryable_errors as error:
+            errors.append({
+                "attempt": attempt,
+                "kind": "retryable",
+                "type": type(error).__name__,
+                "message": str(error),
+            })
             last_error = str(error)
             if attempt == MAX_GENERATION_ATTEMPTS:
                 break
@@ -571,11 +535,18 @@ async def generate_one(
             await asyncio.sleep(delay)
 
         except ResponseValidationError as error:
+            errors.append({
+                "attempt": attempt,
+                "kind": "validation",
+                "type": type(error).__name__,
+                "message": str(error),
+            })
             print(
                 f"\nINVALID product={product['product_id']} "
                 f"[{error.reason}]: {error}"
             )
             last_error = f"{error.reason}: {error}"
+            last_reason = error.reason
 
 
             if content is not None:
@@ -610,6 +581,7 @@ async def generate_one(
         "attempts": attempts,
         "elapsed_sec": elapsed,
         "valid": False,
+        "errors": errors,
         "error": last_error,
         "error_reason": last_reason
     }
@@ -619,6 +591,7 @@ async def run_concurrent(
         items,
         concurrency,
         generate_one_func,
+
 ):
     sem = asyncio.Semaphore(concurrency)
 
@@ -639,141 +612,221 @@ async def run_concurrent(
 
     return results, elapsed
 
-def build_report(
-    *,
+def summarize_run(
     results: list[dict],
-    elapsed: float,
+    wall: float,
     concurrency: int,
-    params: dict,
-    api_comparison: dict | None = None,
 ) -> dict:
-    from collections import Counter
-
-    n = len(results)
-
-    valid_results = [r for r in results if r["valid"]]
-    valid_count = len(valid_results)
-    valid_rate = valid_count / n if n else 0.0
-    throughput = n / elapsed if elapsed > 0 else 0.0
-
-    total_input_tokens = sum(r["input_tokens"] for r in results)
-    total_output_tokens = sum(r["output_tokens"] for r in results)
-
-    avg_latency = (
-        sum(r["elapsed_sec"] for r in results) / n if n else 0.0
-    )
-    avg_attempts = (
-        sum(r["attempts"] for r in results) / n if n else 0.0
-    )
-
-    # Время, за которое сгенерировали бы 300 карточек при той же скорости
-    time_for_300_sec = (elapsed / n * 300) if n else 0.0
-
-    # Стоимость 1000 карточек на этой VM
-    cost_vllm_per_1000 = (
-        elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000 if n else 0.0
-    )
-
-    # Категории ошибок
-    errors_by_reason = dict(
-        Counter(
-            r["error_reason"]
-            for r in results
-            if not r["valid"] and r.get("error_reason")
-        )
-    )
-
-    if api_comparison is None:
-        api_comparison = {
-            "model": None,
-            "n": 0,
-            "valid_rate": 0.0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "elapsed_sec": 0.0,
-            "cost_per_1000": 0.0,
-        }
+    latencies = [r["elapsed_sec"] for r in results]
+    total_out = sum(r["output_tokens"] for r in results)
+    total_in = sum(r["input_tokens"] for r in results)
+    valid = sum(1 for r in results if r["valid"])
+    retried = sum(1 for r in results if r.get("errors"))
 
     return {
-        "run": {
-            "model": MODEL,
-            "concurrency": concurrency,
-            "params": {
-                "temperature": params["temperature"],
-                "top_p": params["top_p"],
-                "top_k": params["top_k"],
-                "repetition_penalty": params["repetition_penalty"],
-                "max_tokens": params["max_tokens"],
-            },
-            "elapsed_sec": round(elapsed, 3),
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "n": n,
-            "avg_latency": round(avg_latency, 3),
-            "avg_attempts": round(avg_attempts, 3),
-        },
-        "metrics": {
-            "valid": valid_count,
-            "valid_rate": round(valid_rate, 4),
-            "throughput": round(throughput, 4),
-            "time_for_300_sec": round(time_for_300_sec, 3),
-            "cost_vllm_per_1000": round(cost_vllm_per_1000, 4),
-            "errors_by_reason": errors_by_reason,
-        },
-        "api_comparison": api_comparison,
+        "concurrency": concurrency,
+        "n": len(results),
+        "wall_sec": round(wall, 2),
+        "throughput_rps": round(len(results) / wall, 2),
+        "throughput_tps": round(total_out / wall, 1),
+        "input_tokens_total": total_in,
+        "output_tokens_total": total_out,
+        "latency_mean": round(statistics.mean(latencies), 3),
+        "latency_p50": round(percentile(latencies, 0.50), 3),
+        "latency_p95": round(percentile(latencies, 0.95), 3),
+        "latency_p99": round(percentile(latencies, 0.99), 3),
+        "valid_rate": round(valid / len(results), 3),
+        "retry_rate": round(retried / len(results), 3),
+        "attempts_mean": round(
+            statistics.mean(r["attempts"] for r in results), 2
+        ),
     }
 
+def percentile(values, q):
+    if not values:
+        return 0.0
+    s = sorted(values)
+    idx = min(int(q * len(s)), len(s) - 1)
+    return s[idx]
+
 async def main():
+    products = load_jsonl(BENCHMARK_PATH)
+
+    
+    await run_concurrent(products[:8], 8, generate_one, DEFAULT_PARAMS)
+
+    rows = []
+    for conc in (1, 2, 4, 8, 16, 32):
+        results, wall = await run_concurrent(
+            products, conc, generate_one, DEFAULT_PARAMS,
+        )
+        rows.append(summarize_run(results, wall, conc))
+
+
+    base = rows[0]["valid_rate"]
+    ok = [r for r in rows if r["valid_rate"] >= 0.98 * base]
+    best = max(ok, key=lambda r: r["throughput_rps"])
+    print("Рабочая точка:", best)
+
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    try:
-        dev_products = load_jsonl(DEV_PATH)
-        print(f"dev products: {len(dev_products)}")
-        print("\nRunning generation...")
-
-        concurrency = 16  # было 4, но в примере отчёта 16
-
-        async def generate(item):
-            return await generate_one(item, DEFAULT_PARAMS)
-
-        results, elapsed = await run_concurrent(
-            dev_products,
-            concurrency,
-            generate,
+    with BENCHMARK_RESULTS_PATH.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "rows": rows,
+                "working_point": best,
+                "baseline_valid_rate": base,
+                "valid_rate_floor": 0.98,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
         )
 
-        predictions = [r["card"] for r in results if r["valid"]]
-        save_jsonl(PREDICTIONS_PATH, predictions)
+    print(f"\nСохранено: {BENCHMARK_RESULTS_PATH}")
 
-        report = build_report(
-            results=results,
-            elapsed=elapsed,
-            concurrency=concurrency,
-            params=DEFAULT_PARAMS,
-            api_comparison=None,   # заполнишь, когда прогонишь бесплатную модель
-        )
 
-        with REPORT_PATH.open("w", encoding="utf-8") as file:
-            json.dump(
-                report,
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
+if __name__ == "__main__":
+    asyncio.run(main())
 
-        print("\nDone.")
-        print(f"Report: {REPORT_PATH}")
-        print(f"Valid rate: {report['metrics']['valid_rate']:.2%}")
-        print(
-            f"Cost per 1000: "
-            f"{report['metrics']['cost_vllm_per_1000']}"
-        )
-        print(
-            f"Errors: "
-            f"{report['metrics']['errors_by_reason']}"
-        )
-    finally:
-        await local_client.close()
+#
+# def build_report(
+#     *,
+#     results: list[dict],
+#     elapsed: float,
+#     concurrency: int,
+#     params: dict,
+#     api_comparison: dict | None = None,
+# ) -> dict:
+#     from collections import Counter
+#
+#     n = len(results)
+#
+#     valid_results = [r for r in results if r["valid"]]
+#     valid_count = len(valid_results)
+#     valid_rate = valid_count / n if n else 0.0
+#     throughput = n / elapsed if elapsed > 0 else 0.0
+#
+#     total_input_tokens = sum(r["input_tokens"] for r in results)
+#     total_output_tokens = sum(r["output_tokens"] for r in results)
+#
+#     avg_latency = (
+#         sum(r["elapsed_sec"] for r in results) / n if n else 0.0
+#     )
+#     avg_attempts = (
+#         sum(r["attempts"] for r in results) / n if n else 0.0
+#     )
+#
+#     # Время, за которое сгенерировали бы 300 карточек при той же скорости
+#     time_for_300_sec = (elapsed / n * 300) if n else 0.0
+#
+#     # Стоимость 1000 карточек на этой VM
+#     cost_vllm_per_1000 = (
+#         elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000 if n else 0.0
+#     )
+#
+#     # Категории ошибок
+#     errors_by_reason = dict(
+#         Counter(
+#             r["error_reason"]
+#             for r in results
+#             if not r["valid"] and r.get("error_reason")
+#         )
+#     )
+#
+#     if api_comparison is None:
+#         api_comparison = {
+#             "model": None,
+#             "n": 0,
+#             "valid_rate": 0.0,
+#             "input_tokens": 0,
+#             "output_tokens": 0,
+#             "elapsed_sec": 0.0,
+#             "cost_per_1000": 0.0,
+#         }
+#
+#     return {
+#         "run": {
+#             "model": MODEL,
+#             "concurrency": concurrency,
+#             "params": {
+#                 "temperature": params["temperature"],
+#                 "top_p": params["top_p"],
+#                 "top_k": params["top_k"],
+#                 "repetition_penalty": params["repetition_penalty"],
+#                 "max_tokens": params["max_tokens"],
+#             },
+#             "elapsed_sec": round(elapsed, 3),
+#             "input_tokens": total_input_tokens,
+#             "output_tokens": total_output_tokens,
+#             "n": n,
+#             "avg_latency": round(avg_latency, 3),
+#             "avg_attempts": round(avg_attempts, 3),
+#         },
+#         "metrics": {
+#             "valid": valid_count,
+#             "valid_rate": round(valid_rate, 4),
+#             "throughput": round(throughput, 4),
+#             "time_for_300_sec": round(time_for_300_sec, 3),
+#             "cost_vllm_per_1000": round(cost_vllm_per_1000, 4),
+#             "errors_by_reason": errors_by_reason,
+#         },
+#         "api_comparison": api_comparison,
+#     }
+#
+# async def main():
+#     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+#
+#     try:
+#         dev_products = load_jsonl(DEV_PATH)
+#         print(f"dev products: {len(dev_products)}")
+#         print("\nRunning generation...")
+#
+#         concurrency = 16  # было 4, но в примере отчёта 16
+#
+#         async def generate(item):
+#             return await generate_one(item, DEFAULT_PARAMS)
+#
+#         results, elapsed = await run_concurrent(
+#             dev_products,
+#             concurrency,
+#             generate,
+#         )
+#
+#         predictions = [r["card"] for r in results if r["valid"]]
+#         save_jsonl(PREDICTIONS_PATH, predictions)
+#
+#         report = build_report(
+#             results=results,
+#             elapsed=elapsed,
+#             concurrency=concurrency,
+#             params=DEFAULT_PARAMS,
+#             api_comparison=None,   # заполнишь, когда прогонишь бесплатную модель
+#         )
+#
+#         with REPORT_PATH.open("w", encoding="utf-8") as file:
+#             json.dump(
+#                 report,
+#                 file,
+#                 ensure_ascii=False,
+#                 indent=2,
+#             )
+#
+#         print("\nDone.")
+#         print(f"Report: {REPORT_PATH}")
+#         print(f"Valid rate: {report['metrics']['valid_rate']:.2%}")
+#         print(
+#             f"Cost per 1000: "
+#             f"{report['metrics']['cost_vllm_per_1000']}"
+#         )
+#         print(
+#             f"Errors: "
+#             f"{report['metrics']['errors_by_reason']}"
+#         )
+#     finally:
+#         await local_client.close()
+
 # async def run_parameter_grid(
 #     products: list[dict],
 # ):
@@ -1043,62 +1096,62 @@ async def main():
 #     asyncio.run(main())
 
 
-async def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    dev_products = load_jsonl(DEV_PATH)
-
-    print(f"dev products: {len(dev_products)}")
-    print("\nRunning generation...")
-
-    concurrency = 4
-
-    async def generate(item):
-        return await generate_one(item, DEFAULT_PARAMS)
-
-    results, elapsed = await run_concurrent(
-        dev_products,
-        concurrency,
-        generate,
-    )
-
-    predictions = [result["card"] for result in results]
-    save_jsonl(PREDICTIONS_PATH, predictions)
-
-    valid_count = sum(
-        result["valid"]
-        for result in results
-    )
-
-    n = len(results)
-    valid_rate = valid_count / n
-    throughput = n / elapsed
-
-    print("\nInvalid results:")
-    cost_vllm_per_1000 = elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000
-
-    for result in results:
-        if not result["valid"]:
-            print(
-                f"{result['card']['product_id']}: "
-                f"{result.get('error')}"
-            )
-    
-    errors = [item["error"] for item in results if item.get('error')]
-    counts_errors = Counter(errors)
-
-    print("\nDone.")
-    print(f"Predictions: {PREDICTIONS_PATH}")
-    print(f"Elapsed: {elapsed:.2f} sec")
-    print(f"Throughput: {throughput:.3f} cards/sec")
-    print(f"Valid rate: {valid_rate:.2%}")
-    print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
-    print(f"ошибки {counts_errors}" )
-
-    await local_client.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
+# async def main():
+#     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+#
+#     dev_products = load_jsonl(DEV_PATH)
+#
+#     print(f"dev products: {len(dev_products)}")
+#     print("\nRunning generation...")
+#
+#     concurrency = 4
+#
+#     async def generate(item):
+#         return await generate_one(item, DEFAULT_PARAMS)
+#
+#     results, elapsed = await run_concurrent(
+#         dev_products,
+#         concurrency,
+#         generate,
+#     )
+#
+#     predictions = [result["card"] for result in results]
+#     save_jsonl(PREDICTIONS_PATH, predictions)
+#
+#     valid_count = sum(
+#         result["valid"]
+#         for result in results
+#     )
+#
+#     n = len(results)
+#     valid_rate = valid_count / n
+#     throughput = n / elapsed
+#
+#     print("\nInvalid results:")
+#     cost_vllm_per_1000 = elapsed / 3600 * VM_RATE_PER_HOUR / n * 1000
+#
+#     for result in results:
+#         if not result["valid"]:
+#             print(
+#                 f"{result['card']['product_id']}: "
+#                 f"{result.get('error')}"
+#             )
+#
+#     errors = [item["error"] for item in results if item.get('error')]
+#     counts_errors = Counter(errors)
+#
+#     print("\nDone.")
+#     print(f"Predictions: {PREDICTIONS_PATH}")
+#     print(f"Elapsed: {elapsed:.2f} sec")
+#     print(f"Throughput: {throughput:.3f} cards/sec")
+#     print(f"Valid rate: {valid_rate:.2%}")
+#     print(f"Цена за 1000 карточек {cost_vllm_per_1000}")
+#     print(f"ошибки {counts_errors}" )
+#
+#     await local_client.close()
+#
+#
+# if __name__ == "__main__":
+#     asyncio.run(main())
+#
 
