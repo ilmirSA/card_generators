@@ -109,8 +109,8 @@ def main():
         card = pred.get("card", pred)
         errs = validate_card(card, expected_id)
         if errs:
-            for e in errs:
-                reasons[e.split(":")[0].strip()] += 1
+            # одна причина на карточку — из generate_one, а не все сразу
+            reasons[pred.get("error_reason") or "прочее"] += 1
         else:
             valid += 1
 
